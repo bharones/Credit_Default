@@ -1,0 +1,247 @@
+---
+title: "Predicting Credit Client's Payment Abilities"
+output:
+  html_document:
+    df_print: paged
+---
+
+#1.Introduction
+
+This notebook will examine default credit data. I try to build a predictive model to determine the payment status of the client. Hopefully, by examining the characteristics of the client we can predict whether they will have difficulties in payment or will repay the credit on time.
+
+#2.Retrieving Data
+
+There are 7 different sources of data, but this time I will only use application_train data as the data source for analysis. The data is still manageable to work with my current tool.
+```{r Retrieving Data, message=FALSE}
+library(readr) #package reading data
+library(tidyverse) #package for table manipulation
+library(randomForest)
+library(caret)
+library(DataExplorer)
+require(xgboost)
+library(ROCR)
+library(pROC)
+
+
+#Read Data
+data <- read.csv("application_train.csv")
+```
+
+
+#3.Glimpse of Data
+
+In additon of having a firm theory of the risk, examining our data will help us enhancing our hypothesis. We can use summary() to examine the mean,median, max, min, etc of the data.
+```{r data}
+head(data) #showing the first five of the records
+str(data) #checking the type variables
+```
+
+#4.Checking Missing Data
+
+Missing data can produce noise especially if it can change the distribution of the data. I will generate how many observations that are missing in each variables using a handy r package called DataExplorer.
+
+```{r missing values, message=FALSE}
+a1 <- as.data.frame(colSums(is.na(data)))
+b1 <- round (as.data.frame(colMeans(is.na(data))*100),digits=2)
+miss <- data.frame(cbind(setNames(a1,c("count")),
+                              setNames(b1,c("percentage"))))
+remove(a1,b1)
+print(miss)
+#plot_missing(train, title="missing values")
+#I run the plot seperately and resize it to make it easier to look
+```
+![](image/Rplot.png)
+
+#5.Recoding and Anomaly Data
+
+There are some categorical variables that need to be recoded since they are still in string type. By recoding them, they are ready to be analysed as categorical data (nominal and ordinal). I also check whether there is an anomlay in the data or not. DAYS_BIRTH has negative values which indicate an anomaly (not make sense), but I can get the client's age from that variable by transforming the data (dividing with -365).
+
+```{r recode and align, warning=F, message=FALSE}
+#Recoding Data
+dmy1 <- dummyVars("~NAME_INCOME_TYPE", data, fullRank = T)
+trsf1 <- data.frame(predict(dmy1, newdata = data))
+
+dmy2 <- dummyVars("~OCCUPATION_TYPE", data, fullRank = T)
+trsf2 <- data.frame(predict(dmy2, newdata = data))
+
+dmy3 <- dummyVars("~NAME_EDUCATION_TYPE", data, fullRank = T)
+trsf3 <- data.frame(predict(dmy3, newdata = data))
+
+data <- cbind(data,trsf1,trsf2,trsf3,fill=T)
+
+remove(dmy1,dmy2,dmy3,trsf1,trsf2,trsf3) #cleaning object
+
+head(data)
+
+#Correcting Anomaly in Days_BIRTH
+data$DAYS_BIRTH <- data$DAYS_BIRTH/-365
+```
+#6.DATA Exploration
+
+This time I use Tableau to help me doing Data Explanatory Analysis, since my current tool can't handle to run the data. It is very computer excessive.
+
+[Link_Tableau](https://public.tableau.com/views/HCI2/HomeCredit?:embed=y&:display_count=yes)
+
+<iframe width="850" height="650" src="https://public.tableau.com/views/HCI2/HomeCredit?:showVizHome=no&:embed=true" frameborder="0" allowFullScreen="true"></iframe>
+
+
+#7.Correlation
+
+correlation is used to check linear relationship among variables. It is also a good start before making the model, we will know the direction of the relationship. It could be the first signal whether our hypothesis is correct or not.
+
+```{r correlation, warning=FALSE, message=FALSE}
+library(reshape2)
+cormat <- as.data.frame(cor(data[,c("TARGET","AMT_ANNUITY","AMT_CREDIT","AMT_GOODS_PRICE","EXT_SOURCE_1",
+  "EXT_SOURCE_2","EXT_SOURCE_3","NAME_EDUCATION_TYPE.Higher.education",
+  "NAME_EDUCATION_TYPE.Incomplete.higher","DAYS_BIRTH",
+  "NAME_EDUCATION_TYPE.Lower.secondary",
+  "NAME_INCOME_TYPE.Maternity.leave",
+  "NAME_INCOME_TYPE.Pensioner",
+  "NAME_INCOME_TYPE.Student","NAME_INCOME_TYPE.Unemployed",
+  "NAME_INCOME_TYPE.Working","OCCUPATION_TYPE.Accountants",
+  "OCCUPATION_TYPE.Cleaning.staff",
+  "OCCUPATION_TYPE.High.skill.tech.staff",
+  "OCCUPATION_TYPE.IT.staff","OCCUPATION_TYPE.Laborers",
+  "OCCUPATION_TYPE.Low.skill.Laborers","OCCUPATION_TYPE.Managers",
+  "OCCUPATION_TYPE.Realty.agents","OCCUPATION_TYPE.Sales.staff",
+  "OCCUPATION_TYPE.Secretaries","OCCUPATION_TYPE.Security.staff",
+  "OCCUPATION_TYPE.Waiters.barmen.staff")], method="spearman", 
+  use="complete"))
+
+#Ideally, we should check all the variables relationships. But again, it is very computer excessive
+
+cormat
+
+#Plot Heatmap Correlation of Variables
+#change column name NAME_EDUCATION_TYPE.Higher.education
+colnames(data)[148]  <- "HIGHER_ED"
+
+cor <- cor(data[,c("TARGET","HIGHER_ED","AMT_GOODS_PRICE",
+  "DAYS_BIRTH","EXT_SOURCE_1","EXT_SOURCE_2","EXT_SOURCE_3")], use="complete", method="spearman")
+
+melted_cormat <- melt(cor)
+head(melted_cormat)
+heatmap <- ggplot(data=melted_cormat,aes(x=Var1, y=Var2, fill=value)) + geom_tile() + 
+  xlab("") + ylab("")
+#print(heatmap)
+```
+![](image/Rplot02.png)
+
+#8.Logistic Regression Model
+
+There are many ways to do predictive analyses. In this case, I will use logistic regression where the dependent variable is binary 0:repaid on time and 1:payment difficulties. Ideally, we should generate many models then we choose the best logistic regression model that has the smallest accuracy measures as the base for model training.The AIC of model2 is lower.
+
+```{r Logistic Regression}
+data$TARGET <- as.factor(data$TARGET)
+data$TARGET <- relevel(data$TARGET, ref = "0")
+
+model1 <- glm(TARGET~AMT_CREDIT+AMT_GOODS_PRICE+NAME_EDUCATION_TYPE+
+               DAYS_BIRTH+EXT_SOURCE_1+EXT_SOURCE_2+EXT_SOURCE_3, 
+              family =binomial(link="logit"),data=data, 
+              na.action = na.omit)
+
+summary(model1$aic)
+
+model2 <- glm(TARGET~AMT_CREDIT+AMT_GOODS_PRICE+DAYS_BIRTH+
+               EXT_SOURCE_1+EXT_SOURCE_2+EXT_SOURCE_3+
+               NAME_EDUCATION_TYPE+
+               NAME_INCOME_TYPE+
+               OCCUPATION_TYPE, 
+               family =binomial(link="logit"),
+               data=data,na.action = na.omit)
+
+summary(model2$aic)
+#model 2 is better (lower AIC)
+
+```
+
+#9.Performance of Logistic Regression
+
+We choose the model that has the lowest AIC as model for training. AUC Valid for this model is 0.74 which is quite good. We will check whether we can improve the model using other algorithm.
+```{r Subset Data}
+#partition and create training data, testing data
+datafix <- subset(data, select = c(
+             "TARGET",
+             "AMT_CREDIT",
+             "AMT_GOODS_PRICE",
+             "DAYS_BIRTH",
+             "EXT_SOURCE_1",
+             "EXT_SOURCE_2",
+             "EXT_SOURCE_3",
+             "NAME_EDUCATION_TYPE",
+             "NAME_INCOME_TYPE",
+             "OCCUPATION_TYPE"))
+```
+
+```{r Partition}
+set.seed(100)
+train <- sample(nrow(data), 0.7*nrow(datafix))
+TrainSet <- datafix[train,]
+TestSet <- datafix[-train,]
+```
+
+```{r Model Training}
+modelRL <- glm(TARGET~., 
+               family =binomial(link="logit"),
+               data=TrainSet,na.action = na.omit)
+
+RL_p <- predict(modelRL, newdata = TestSet, type="response")
+
+auc(TestSet$TARGET, RL_p)
+```
+
+
+#10.Improving Model
+
+First, I use Random Forest algorithm to improve the model. Using this model, we can see which variables are the most relevant. AUC Valid is not better than logistic regression. Unfortunately, my current tool can't run the random forest using ntree >= 500 (default setting). Increasing ntree should help increase the model's performance. Second, Xgboost also shows lower AUC Valid compared to Logistic Regression.
+
+```{r Random Forest, message=FALSE}
+set.seed(100)
+rf <- randomForest(TARGET~., data=TrainSet, strata = TARGET,
+            importance=TRUE, na.action = na.omit,
+            ntree=300
+            )
+
+rf_p <- predict(rf,TestSet,type="prob")[,2]
+rf_pr <- prediction(rf_p, TestSet$TARGET)
+
+rf
+print(importance(rf))
+
+```
+
+```{r plot importance}
+varImpPlot(rf, main="importance feature",type=2)
+```
+
+```{r Data for XGB, message=FALSE}
+train <- data.matrix(TrainSet)
+test <- data.matrix(TestSet)
+y = data.matrix(TrainSet['TARGET'])
+```
+
+```{r Xgboost, message=FALSE}
+xgb <- xgboost(data=train[,-1], label = y, booster = 'gbtree',
+               verbose = 0, 
+               nrounds = 25,
+               eta = 0.1,
+               max_depth = 5,
+               subsample = 0.5
+               )
+
+xgb_p <- predict(xgb, test[,-1])
+
+xgb$feature_names
+```
+
+```{r Plot ROC}
+plot(roc(TestSet$TARGET, xgb_p, direction="<"), col="red", lwd=2, main="ROC Plot")
+lines(roc(TestSet$TARGET, rf_p, direction="<"), col="purple", lwd=2)
+lines(roc(TestSet$TARGET, RL_p, direction="<"), col="blue", lwd=2)
+legend(0.0,0.4, c('LR','RF','XGB'),lty=c(1,1), lwd=c(2.5,2.5),col=c('red','purple','blue'))
+
+paste("Logistic Regression:", round(auc(TestSet$TARGET, RL_p),5))
+paste("Random Forest:", round(auc(TestSet$TARGET, rf_p),5))
+paste("XGBoost:", round(auc(TestSet$TARGET, xgb_p),5))
+```
+
